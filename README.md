@@ -1,1 +1,5 @@
-All data is derived from Qin L, Huang S, Chen Q, et al. MMSD2. 0: Towards a Reliable Multi-modal Sarcasm Detection System[C]//Findings of the Association for Computational Linguistics: ACL 2023. 2023: 10834-10845.
+The code will be updated to the repository when it is sorted out.
+
+If you have any questions you can contact by email: wang_tg@webmail.hzau.edu.cn
+
+Thank you for your attention!
