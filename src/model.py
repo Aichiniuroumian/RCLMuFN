@@ -127,36 +127,73 @@ class RCLMuFN(nn.Module):
 
     def forward(self, inputs, batch, labels):
         output = self.model(**inputs,output_attentions=True)
-        text_feature = output['text_model_output']['pooler_output']
-        image_feature = output['vision_model_output']['pooler_output']
-        text_feature = self.text_linear(text_feature)
-        image_feature = self.image_linear(image_feature)
+
+        # 提取对应的特征
+        text_features = output['text_model_output']['last_hidden_state']  # 128，77，512
+        image_features = output['vision_model_output']['last_hidden_state']  # 128，50，768
+        text_feature = output['text_model_output']['pooler_output'] # 64，512
+        image_feature = output['vision_model_output']['pooler_output'] # 64，768
+        text_feature = self.text_linear(text_feature)  # 64，768
+        image_feature = self.image_linear(image_feature)  # 64,768
+
         text_list, image_list, label_list, id_list, samples = batch
+
         features, pos = self.backbone(samples.to(inputs['input_ids'].device) )
-        src, mask = features[-1].decompose()
-        src = self.input_proj(src)
-        pooled_features = self.pool(src)
-        res_features = pooled_features.view(pooled_features.size(0), -1)
+        src, mask = features[-1].decompose()  # 32,2048,7,7
+
+        # resnet50
+        src = self.input_proj(src)  # 64,768,7,7
+        pooled_features = self.pool(src)  # [batch_size, 768, 1, 1]
+        res_features = pooled_features.view(pooled_features.size(0), -1)  # [32, 768]
+        # bert
         encoded_input = self.tokenizer(text_list, padding=True, truncation=True, return_tensors='pt')
         encoded_input = encoded_input.to(inputs['input_ids'].device)
         with torch.no_grad():
             outputs_bert = self.bert_model(**encoded_input)
-            pooler_outputs = outputs_bert.pooler_output
-        bert_text_features = self.txt(pooler_outputs)
-        image_t = self.imtxt_cross(tgt=res_features, memory=bert_text_features)
-        text_im = self.imtxt_cross(tgt=bert_text_features, memory=res_features)
-        cross_feature_text = self.cross_att(text_feature, image_feature, image_feature)
-        cross_feature_image = self.cross_att(image_feature, text_feature, text_feature)
+            last_hidden_states = outputs_bert.last_hidden_state  # 64,56,768
+            pooler_outputs = outputs_bert.pooler_output  # 64,768
+        bert_text_features = self.txt(pooler_outputs)  # 64,768
+
+        # SFIM
+        image_t = self.imtxt_cross(tgt=res_features, memory=bert_text_features)  # 32,768
+        text_im = self.imtxt_cross(tgt=bert_text_features, memory=res_features)  # 32,768
+
+        # RCLM
+        text_feature2 = self.txt2(torch.cat([text_feature, text_im], dim=-1))  # 32,768
+        text_feature2 = text_feature2.unsqueeze(1)  # 32,1,768
+        txt_cat = self.text_self(torch.stack([text_feature, text_im], dim=1))  # 32,2,768
+        txt_output = self.text_cross(tgt=text_feature2, memory=txt_cat)  # 32,1,768
+        txt_output = txt_output.squeeze(1)  # 32,768
+
+        image_feature2 = self.vis2(torch.cat([image_feature, image_t],dim=-1))  # 32,768
+        image_feature2 = image_feature2.unsqueeze(1)  # 32,1,768
+        image_cat = self.vis_self(torch.stack([image_feature, image_t], dim=1))  # 32,2,768
+        image_output = self.vis_cross(tgt=image_feature2, memory=image_cat)  # 32,1,768
+        image_output = image_output.squeeze(1)  # 32,768
+
+        txt_out = self.cross_att(txt_output, image_output, image_output)  # 32,768
+        image_out = self.cross_att(image_output, txt_output, txt_output)  # 32,768
+        res_bert = 0.6 * image_out + 0.4 * txt_out  # 32,768
+        # res_bert = image_t + text_im
+
+        # CLIP-View Feature Fusion
+        cross_feature_text = self.cross_att(text_feature, image_feature, image_feature)  # 32,768
+        cross_feature_image = self.cross_att(image_feature, text_feature, text_feature)  # 32,768
         fuse_feature = 0.7 * cross_feature_text + 0.3 * cross_feature_image
-        res_bert = image_t + text_im
-        att = self.attetion_block(torch.cat([fuse_feature, res_bert], dim=-1))
-        output = fuse_feature + att * self.mlp_layer(torch.cat([fuse_feature, res_bert], dim=-1))
-        logits_fuse = self.classifier_fuse(output)
-        fuse_score = nn.functional.softmax(logits_fuse, dim=-1)
+
+        # MuFFM
+        att = self.attetion_block(torch.cat([fuse_feature, res_bert], dim=-1))  # 32,768
+        output = 0.5 * fuse_feature + 0.5 * (att * self.mlp_layer(torch.cat([fuse_feature, res_bert], dim=-1)))  # 32,768
+
+        # Predict
+        logits_fuse = self.classifier_fuse(output)  # 64,2  output
+        fuse_score = nn.functional.softmax(logits_fuse, dim=-1)  # 64,2
+
         score = fuse_score
-        outputs = (score,)
+
+        outputs = (score,) # (64,2)
         if labels is not None:
-            loss_fuse = self.loss_fct(logits_fuse, labels)  # tensor(0.7863)
+            loss_fuse = self.loss_fct(logits_fuse, labels)
             loss = loss_fuse
             outputs = (loss,) + outputs
         return outputs
