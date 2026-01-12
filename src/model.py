@@ -1,3 +1,10 @@
+# ==============================================================================
+# NOTICE:
+# This implementation performs Cross-Attention on pooled features (Batch Interaction).
+# This differs from the intra-sample attention described in the paper.
+# We are checking all the codes and will update the latest ones.
+# ==============================================================================
+
 from typing import Optional
 
 from torch import Tensor
